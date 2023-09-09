@@ -30,7 +30,7 @@ type host struct {
 	Role    *string `json:"role,omitempty"`
 }
 
-type ipGroup struct {
+type hostGroup struct {
 	Hosts []host `json:"hosts"`
 }
 
@@ -135,7 +135,7 @@ func SetIPPool(filePath string, world *MPIWorld) error {
 		return err
 	}
 
-	var group ipGroup
+	var group hostGroup
 	err = json.Unmarshal(ipFile, &group)
 	if err != nil {
 		return err
