@@ -2,14 +2,17 @@ package main
 
 import (
 	"fmt"
-	"os"
 
-	"github.com/sunblaze-ucb/simpleMPI/mpi"
+	"github.com/jparr721/simpleMPI/mpi"
 )
 
 func main() {
-	fmt.Println("Hello, playground", os.Args)
-	world := mpi.WorldInit("/etc/hosts", "config")
-	fmt.Println(world)
+	world := mpi.WorldInit("/Users/jarredparr/Documents/Projects/zkp.nosync/simpleMPI/test/ip.json",
+		"/Users/jarredparr/Documents/Projects/zkp.nosync/simpleMPI/test/config.json")
+	fmt.Println("WORLD", world)
+	fmt.Println("WORLD", world.Size)
+	fmt.Println("WORLD", world.Rank)
+	fmt.Println("WORLD", world.IPPool)
+	fmt.Println("WORLD", world.Port)
 	mpi.Close()
 }

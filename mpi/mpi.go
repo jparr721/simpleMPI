@@ -1,12 +1,12 @@
 package mpi
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/md5"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"runtime/debug"
@@ -15,13 +15,34 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"go.uber.org/zap"
 )
 
+type config struct {
+	User    string `json:"user"`
+	KeyFile string `json:"keyfile"`
+	Verbose bool   `json:"verbose"`
+}
+
+type host struct {
+	Address string  `json:"address"`
+	Role    *string `json:"role,omitempty"`
+}
+
+type ipGroup struct {
+	Hosts []host `json:"hosts"`
+}
+
 type MPIWorld struct {
-	size   uint64
-	rank   []uint64
+	Size   uint64
+	Rank   []uint64
 	IPPool []string
 	Port   []uint64
+}
+
+func init() {
+	zap.ReplaceGlobals(zap.Must(zap.NewProduction()))
 }
 
 func SerializeWorld(world *MPIWorld) []byte {
@@ -30,11 +51,11 @@ func SerializeWorld(world *MPIWorld) []byte {
 	// size: uint64
 	buf := make([]byte, 0)
 	sizebuf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(sizebuf, world.size)
+	binary.LittleEndian.PutUint64(sizebuf, world.Size)
 	buf = append(buf, sizebuf...)
 
 	// rank: []uint64
-	for _, rank := range world.rank {
+	for _, rank := range world.Rank {
 		rankBuf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(rankBuf, rank)
 		buf = append(buf, rankBuf...)
@@ -62,19 +83,19 @@ func DeserializeWorld(buf []byte) *MPIWorld {
 	// format: size, rank, IPPool, Port
 	// size: uint64
 	world := new(MPIWorld)
-	world.size = binary.LittleEndian.Uint64(buf[:8])
+	world.Size = binary.LittleEndian.Uint64(buf[:8])
 	buf = buf[8:]
 
 	// rank: []uint64
-	world.rank = make([]uint64, world.size)
-	for i := uint64(0); i < world.size; i++ {
-		world.rank[i] = binary.LittleEndian.Uint64(buf[:8])
+	world.Rank = make([]uint64, world.Size)
+	for i := uint64(0); i < world.Size; i++ {
+		world.Rank[i] = binary.LittleEndian.Uint64(buf[:8])
 		buf = buf[8:]
 	}
 
 	// IPPool: []string
-	world.IPPool = make([]string, world.size)
-	for i := uint64(0); i < world.size; i++ {
+	world.IPPool = make([]string, world.Size)
+	for i := uint64(0); i < world.Size; i++ {
 		end := 0
 		for end < len(buf) && buf[end] != 0 {
 			end++
@@ -84,8 +105,8 @@ func DeserializeWorld(buf []byte) *MPIWorld {
 	}
 
 	// Port: []uint64
-	world.Port = make([]uint64, world.size)
-	for i := uint64(0); i < world.size; i++ {
+	world.Port = make([]uint64, world.Size)
+	for i := uint64(0); i < world.Size; i++ {
 		world.Port[i] = binary.LittleEndian.Uint64(buf[:8])
 		buf = buf[8:]
 	}
@@ -104,43 +125,56 @@ var (
 	WorldSize             uint64
 )
 
+// SetIPPool unpacks the json file `filePath` and unrolls the ip groups
+// into the world and sets the rank and size as appropriate.
 func SetIPPool(filePath string, world *MPIWorld) error {
 	// reading IP from file, the first IP is the master node
 	// the rest are the slave nodes
-	ipFile, err := os.Open(filePath)
+	ipFile, err := os.ReadFile(filePath)
 	if err != nil {
 		return err
 	}
-	defer ipFile.Close()
-	scanner := bufio.NewScanner(ipFile)
-	for scanner.Scan() {
-		line := scanner.Text()
-		//IP and hostname are separated by a space
 
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		if len(line) == 0 {
-			continue
-		}
-		hostname := strings.Split(line, " ")[1]
-		//if hostname doesn't start with "node" we skip
-		if !(hostname[:4] == "node" || (len(hostname) >= 6 && hostname[:6] == "master")) {
-			continue
-		}
-
-		world.IPPool = append(world.IPPool, strings.Split(line, " ")[0])
-
-		if err != nil {
-			return err
-		}
-		// get a random port number betwee 10000 and 20000
-		world.rank = append(world.rank, world.size)
-		world.size++
-	}
-	if err := scanner.Err(); err != nil {
+	var group ipGroup
+	err = json.Unmarshal(ipFile, &group)
+	if err != nil {
 		return err
 	}
+
+	hosts := group.Hosts
+
+	masterFound := false
+	for _, host := range hosts {
+		// The role is optional, as long as we have a master node.
+		var role string
+		if host.Role == nil {
+			role = "node"
+		} else {
+			role = *host.Role
+		}
+
+		if role != "node" && role != "master" {
+			zap.L().Error("Invalid Role Found", zap.String("Role", role))
+			continue
+		}
+
+		if role == "master" {
+			masterFound = true
+		}
+
+		address := host.Address
+		world.IPPool = append(world.IPPool, address)
+
+		// get a random port number betwee 10000 and 20000
+		world.Rank = append(world.Rank, world.Size)
+		world.Size++
+	}
+
+	// Make sure that we found a master node
+	if !masterFound {
+		return errors.New("No master node found")
+	}
+
 	return nil
 }
 
@@ -167,293 +201,333 @@ func checkSlave() bool {
 	return strings.ToLower(LastCommand) == "slave"
 }
 
-type config struct {
-	User    string
-	KeyFile string
-	Verbose bool
-}
-
-func ParseConfig(ConfigFilePath string) config {
-	// parse the config file
-	// format: user, keyfile, verbose
-	// user: string
-	// keyfile: string
-	// verbose: bool
-	config := config{}
-	configFile, err := os.Open(ConfigFilePath)
+// ParseConfig parses the config JSON file
+//
+//	 {
+//	 user: string
+//	 keyfile: string
+//	 verbose: bool
+//	}
+func ParseConfig(ConfigFilePath string) (config, error) {
+	var cfg config
+	configFile, err := os.ReadFile(ConfigFilePath)
 	if err != nil {
-		panic(err)
+		return cfg, err
 	}
-	defer configFile.Close()
-	scanner := bufio.NewScanner(configFile)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "user") {
-			config.User = strings.Split(line, " ")[1]
-		} else if strings.HasPrefix(line, "keyfile") {
-			config.KeyFile = strings.Split(line, " ")[1]
-		} else if strings.HasPrefix(line, "verbose") {
-			config.Verbose, err = strconv.ParseBool(strings.Split(line, " ")[1])
-			if err != nil {
-				panic(err)
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		panic(err)
-	}
-	return config
+
+	json.Unmarshal(configFile, &cfg)
+
+	return cfg, nil
 }
 
-func WorldInit(HostFilePath string, ConfigFilePath string) *MPIWorld {
+// WorldInit initializes the TCP connections between the main node and the slave nodes.
+// It takes as input the HostFilePath which is a newline delimited sequence of IP addresses
+// with the host IP first. The format for this file is as follows:
+//
+//	localhost:9998
+//	localhost:9999
+//
+// The second paramter allows for the specification of the config file which allows for
+// the configuration of the slave nodes. An example of this configuration can be seen as
+// follows:
+//
+//	{
+//	user "my_username"
+//	keyfile "$HOME/.ssh/private_key_file
+//	verbose true
+//	}
+func WorldInit(hostFilePath, configFilePath string) *MPIWorld {
+	zap.L().Info("Initializing MPI World",
+		zap.String("HostFilePath", hostFilePath),
+		zap.String("ConfigFilePath", configFilePath),
+	)
 	world := new(MPIWorld)
-	world.size = 0
-	world.rank = make([]uint64, 0)
+	world.Size = 0
+	world.Rank = make([]uint64, 0)
 	world.IPPool = make([]string, 0)
 	world.Port = make([]uint64, 0)
 
 	selfIP, _ := GetLocalIP()
-	fmt.Println(selfIP)
 
 	isSlave := checkSlave()
+	zap.L().Info("Assigning node position",
+		zap.Bool("isSlave", isSlave),
+		zap.String("My IPs", strings.Join(selfIP, ",")),
+	)
 
 	//Setup TCP connections master <--> slaves
 
 	if !isSlave {
-		configuration := ParseConfig(ConfigFilePath)
-		err := SetIPPool(HostFilePath, world)
-		world.Port = make([]uint64, world.size)
-		if err != nil {
-			fmt.Println(err)
-			panic(err)
-		}
-		MasterToSlaveTCPConn = make([]*net.Conn, world.size)
-		SlaveOutputs = make([]bytes.Buffer, world.size)
-		SlaveOutputsErr = make([]bytes.Buffer, world.size)
-		MasterToSlaveListener = make([]*net.Listener, world.size)
-		MasterToSlaveTCPConn[0] = nil
-		selfFileLocation, _ := os.Executable()
-		SelfRank = 0
-		for i := 1; i < int(world.size); i++ {
-			slaveIP := world.IPPool[i]
-			slaveRank := uint64(i)
-
-			// Start slave process via ssh
-			fmt.Println(configuration.KeyFile)
-			key, err := ioutil.ReadFile(configuration.KeyFile)
-			if err != nil {
-				fmt.Printf("unable to read private key: %v\n", err)
-				panic("Failed to load key")
-			}
-			signer, err := ssh.ParsePrivateKey(key)
-			if err != nil {
-				fmt.Printf("unable to parse private key: %v\n", err)
-				panic("Failed to parse key")
-			}
-			fmt.Println(slaveIP)
-			conn, err := ssh.Dial("tcp", slaveIP+":"+strconv.Itoa(int(22)), &ssh.ClientConfig{
-				User: configuration.User,
-				Auth: []ssh.AuthMethod{
-					ssh.PublicKeys(signer),
-				},
-				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-			})
-
-			if err != nil {
-				fmt.Println(err)
-				panic("Failed to dial: " + err.Error())
-			}
-
-			// Listen to slave
-
-			listener, err := net.Listen("tcp", ":0")
-			world.Port[i] = uint64(listener.Addr().(*net.TCPAddr).Port)
-			fmt.Println("Slave " + strconv.Itoa(i) + " Listening on port: " + strconv.Itoa(int(world.Port[i])))
-			if err != nil {
-				fmt.Println(err)
-				panic("Failed to listen: " + err.Error())
-			}
-
-			session, err := conn.NewSession()
-			if err != nil {
-				fmt.Println(err)
-				panic("Failed to create session: " + err.Error())
-			}
-			Command := selfFileLocation
-			for j := 1; j < len(os.Args); j++ {
-				Command += " " + os.Args[j]
-			}
-			Command += " " + world.IPPool[0] + " " + strconv.Itoa(int(world.Port[i]))
-			Command += " Slave"
-			stdOutRedirected := make(chan struct{}, 1)
-			//run the command async and panic when command return error
-			go func() {
-				defer session.Close()
-				session.Stdout = &SlaveOutputs[i]
-				session.Stderr = &SlaveOutputsErr[i]
-				close(stdOutRedirected)
-				err := session.Run(Command)
-
-				if err != nil {
-					fmt.Println(err)
-				}
-			}()
-
-			go func(rank uint64) {
-				// Print the output of the command
-				<-stdOutRedirected
-				for {
-					func() {
-						defer func() {
-							if r := recover(); r != nil {
-								fmt.Println("Output err at rank", rank)
-							}
-							time.Sleep(1 * time.Second)
-						}()
-						data, _ := SlaveOutputs[rank].ReadString('\n')
-						if data != "" && configuration.Verbose {
-							fmt.Println("rank " + strconv.Itoa(int(rank)) + " " + data)
-						}
-						data, _ = SlaveOutputsErr[rank].ReadString('\n')
-						if data != "" {
-							ErrorColor := "\033[1;31m%s\033[0m"
-							fmt.Printf(ErrorColor, "rank "+strconv.Itoa(int(rank))+" ERR "+data)
-						}
-						time.Sleep(1 * time.Microsecond)
-					}()
-				}
-			}(uint64(i))
-
-			// Accept a connection
-			TCPConn, err := listener.Accept()
-
-			MasterToSlaveTCPConn[i] = &TCPConn
-			MasterToSlaveListener[i] = &listener
-			if err != nil {
-				fmt.Println(err)
-				panic("Failed to connect via TCP: " + err.Error())
-			}
-			fmt.Println("Connected to slave " + strconv.Itoa(i))
-
-			// Send slave rank
-			buf := make([]byte, 8)
-			binary.LittleEndian.PutUint64(buf, uint64(slaveRank))
-			_, err = TCPConn.Write(buf)
-			if err != nil {
-				fmt.Println(err)
-				panic("Failed to send rank: " + err.Error())
-			}
-
-			// Send the working directory
-			{
-				workingDir, err := os.Getwd()
-				if err != nil {
-					fmt.Println(err)
-					panic("Failed to get working directory: " + err.Error())
-				}
-				//Send string length
-				buf = make([]byte, 8)
-				binary.LittleEndian.PutUint64(buf, uint64(len(workingDir)))
-				_, err = TCPConn.Write(buf)
-				if err != nil {
-					fmt.Println(err)
-					panic("Failed to send working directory length: " + err.Error())
-				}
-				//Send string
-				_, err = TCPConn.Write([]byte(workingDir))
-				if err != nil {
-					fmt.Println(err)
-					panic("Failed to send working directory: " + err.Error())
-				}
-				fmt.Println("Sent working directory to slave " + strconv.Itoa(i))
-			}
-
-			// Sync the world state
-			buf = SerializeWorld(world)
-
-			//Send buf size
-			bufSize := make([]byte, 8)
-			binary.LittleEndian.PutUint64(bufSize, uint64(len(buf)))
-			_, err = TCPConn.Write(bufSize)
-			if err != nil {
-				fmt.Println(err)
-				panic("Failed to send buf size: " + err.Error())
-			}
-
-			//Send buf
-			_, err = TCPConn.Write(buf)
-			if err != nil {
-				fmt.Println(err)
-				panic("Failed to send world: " + err.Error())
-			}
-
-		}
+		ConfigureMaster(hostFilePath, configFilePath, world)
 	} else {
-		// connect to master
-		masterIP := os.Args[len(os.Args)-3]
-		slavePort := os.Args[len(os.Args)-2]
-		TCPConn, err := net.Dial("tcp", masterIP+":"+slavePort)
-		SlaveToMasterTCPConn = &TCPConn
-		if err != nil {
-			fmt.Println(err)
-			panic("Failed to accept: " + err.Error())
-		}
-		// Receive master rank
-		buf := make([]byte, 8)
-		_, err = TCPConn.Read(buf)
-		if err != nil {
-			fmt.Println(err)
-			panic("Failed to receive rank: " + err.Error())
-		}
-		SelfRank = binary.LittleEndian.Uint64(buf)
+		ConfigureSlave(world)
+	}
+	WorldSize = world.Size
+	return world
+}
 
-		// Receive the working directory
+func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
+	configuration, err := ParseConfig(configFilePath)
+	if err != nil {
+		panic(err)
+	}
+	zap.L().Info("Configuration loaded successfully",
+		zap.String("KeyFile", configuration.KeyFile),
+		zap.String("User", configuration.User))
+
+	err = SetIPPool(hostFilePath, world)
+
+	world.Port = make([]uint64, world.Size)
+	if err != nil {
+		panic(err)
+	}
+
+	if world.Size == 0 {
+		panic("World has no slaves")
+	}
+
+	MasterToSlaveTCPConn = make([]*net.Conn, world.Size)
+	SlaveOutputs = make([]bytes.Buffer, world.Size)
+	SlaveOutputsErr = make([]bytes.Buffer, world.Size)
+	MasterToSlaveListener = make([]*net.Listener, world.Size)
+	MasterToSlaveTCPConn[0] = nil
+
+	// The path of the executable always is assumed to be in the
+	// home directory
+	selfFileLocation := "$HOME/simpleMPI/main"
+	// selfFileLocation, _ := os.Executable()
+
+	SelfRank = 0
+	for i := 1; i < int(world.Size); i++ {
+		slaveIP := world.IPPool[i]
+		slavePort := world.Port[i]
+		slaveRank := uint64(i)
+
+		// Start slave process via ssh
+		key, err := os.ReadFile(configuration.KeyFile)
+		if err != nil {
+			fmt.Printf("unable to read private key: %v\n", err)
+			panic("Failed to load key")
+		}
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			fmt.Printf("unable to parse private key: %v\n", err)
+			panic("Failed to parse key")
+		}
+		zap.L().Info("Connecting to slave", zap.String("SlaveIP", slaveIP))
+		conn, err := ssh.Dial("tcp", slaveIP+":"+strconv.Itoa(int(22)), &ssh.ClientConfig{
+			User: configuration.User,
+			Auth: []ssh.AuthMethod{
+				ssh.PublicKeys(signer),
+			},
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		})
+
+		if err != nil {
+			fmt.Println(err)
+			panic("Failed to dial: " + err.Error())
+		}
+
+		// Listen to slave
+		listener, err := net.Listen("tcp", ":"+strconv.Itoa(int(slavePort)))
+		if err != nil {
+			fmt.Println(err)
+			panic("Failed to listen: " + err.Error())
+		}
+		world.Port[i] = uint64(listener.Addr().(*net.TCPAddr).Port)
+		fmt.Println("Slave " + strconv.Itoa(i) + " Listening on port: " + strconv.Itoa(int(world.Port[i])))
+		if err != nil {
+			fmt.Println(err)
+			panic("Failed to listen: " + err.Error())
+		}
+
+		session, err := conn.NewSession()
+		if err != nil {
+			fmt.Println(err)
+			panic("Failed to create session: " + err.Error())
+		}
+		Command := selfFileLocation
+		for j := 1; j < len(os.Args); j++ {
+			Command += " " + os.Args[j]
+		}
+		Command += " " + world.IPPool[0] + " " + strconv.Itoa(int(world.Port[i]))
+		Command += " Slave"
+
+		zap.L().Info("Preparing command", zap.String("Command", Command))
+
+		stdOutRedirected := make(chan struct{}, 1)
+		//run the command async and panic when command return error
+		go func() {
+			defer session.Close()
+			session.Stdout = &SlaveOutputs[i]
+			session.Stderr = &SlaveOutputsErr[i]
+			close(stdOutRedirected)
+			err := session.Run(Command)
+
+			if err != nil {
+				fmt.Println("COMMAND ERROR", err)
+			} else {
+				fmt.Println("STDOUT", session.Stdout)
+			}
+		}()
+
+		go func(rank uint64) {
+			// Print the output of the command
+			<-stdOutRedirected
+			for {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Println("Output err at rank", rank)
+						}
+						time.Sleep(1 * time.Second)
+					}()
+					data, _ := SlaveOutputs[rank].ReadString('\n')
+					if data != "" && configuration.Verbose {
+						fmt.Println("rank " + strconv.Itoa(int(rank)) + " " + data)
+					}
+					data, _ = SlaveOutputsErr[rank].ReadString('\n')
+					if data != "" {
+						ErrorColor := "\033[1;31m%s\033[0m"
+						fmt.Printf(ErrorColor, "rank "+strconv.Itoa(int(rank))+" ERR "+data)
+					}
+					time.Sleep(1 * time.Microsecond)
+				}()
+			}
+		}(uint64(i))
+
+		// Accept a connection
+		TCPConn, err := listener.Accept()
+
+		MasterToSlaveTCPConn[i] = &TCPConn
+		MasterToSlaveListener[i] = &listener
+		if err != nil {
+			fmt.Println(err)
+			panic("Failed to connect via TCP: " + err.Error())
+		}
+		fmt.Println("Connected to slave " + strconv.Itoa(i))
+
+		// Send slave rank
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(slaveRank))
+		_, err = TCPConn.Write(buf)
+		if err != nil {
+			fmt.Println(err)
+			panic("Failed to send rank: " + err.Error())
+		}
+
+		// Send the working directory
 		{
-			//Receive string length
+			workingDir, err := os.Getwd()
+			if err != nil {
+				fmt.Println(err)
+				panic("Failed to get working directory: " + err.Error())
+			}
+			//Send string length
 			buf = make([]byte, 8)
-			_, err = TCPConn.Read(buf)
+			binary.LittleEndian.PutUint64(buf, uint64(len(workingDir)))
+			_, err = TCPConn.Write(buf)
 			if err != nil {
 				fmt.Println(err)
-				panic("Failed to receive working directory length: " + err.Error())
+				panic("Failed to send working directory length: " + err.Error())
 			}
-			workingDirLength := binary.LittleEndian.Uint64(buf)
-			//Receive string
-			buf = make([]byte, workingDirLength)
-			_, err = TCPConn.Read(buf)
+			//Send string
+			_, err = TCPConn.Write([]byte(workingDir))
 			if err != nil {
 				fmt.Println(err)
-				panic("Failed to receive working directory: " + err.Error())
+				panic("Failed to send working directory: " + err.Error())
 			}
-			workingDir := string(buf)
-			err = os.Chdir(workingDir)
-			if err != nil {
-				fmt.Println(err)
-				panic("Failed to change working directory: " + err.Error())
-			}
-			workingDir, _ = os.Getwd()
-			fmt.Println("Changed working directory to " + workingDir)
+			fmt.Println("Sent working directory to slave " + strconv.Itoa(i))
 		}
 
 		// Sync the world state
-		// Receive buf size
+		buf = SerializeWorld(world)
+
+		//Send buf size
 		bufSize := make([]byte, 8)
-		_, err = TCPConn.Read(bufSize)
+		binary.LittleEndian.PutUint64(bufSize, uint64(len(buf)))
+		_, err = TCPConn.Write(bufSize)
 		if err != nil {
 			fmt.Println(err)
-			panic("Failed to receive buf size: " + err.Error())
+			panic("Failed to send buf size: " + err.Error())
 		}
-		buf = make([]byte, binary.LittleEndian.Uint64(bufSize))
-		fmt.Println("Received buf size " + strconv.Itoa(int(binary.LittleEndian.Uint64(bufSize))))
 
+		//Send buf
+		_, err = TCPConn.Write(buf)
+		if err != nil {
+			fmt.Println(err)
+			panic("Failed to send world: " + err.Error())
+		}
+
+	}
+}
+
+func ConfigureSlave(world *MPIWorld) {
+	// Connect to master node
+	masterIP := os.Args[len(os.Args)-3]
+	slavePort := os.Args[len(os.Args)-2]
+
+	zap.L().Info("Connecting to master node", zap.String("Master IP", masterIP), zap.String("My Port", slavePort))
+
+	TCPConn, err := net.Dial("tcp", masterIP+":"+slavePort)
+	SlaveToMasterTCPConn = &TCPConn
+	if err != nil {
+		fmt.Println(err)
+		panic("Failed to accept: " + err.Error())
+	}
+	// Receive master rank
+	buf := make([]byte, 8)
+	_, err = TCPConn.Read(buf)
+	if err != nil {
+		fmt.Println(err)
+		panic("Failed to receive rank: " + err.Error())
+	}
+	SelfRank = binary.LittleEndian.Uint64(buf)
+
+	// Receive the working directory
+	{
+		//Receive string length
+		buf = make([]byte, 8)
 		_, err = TCPConn.Read(buf)
 		if err != nil {
 			fmt.Println(err)
-			panic("Failed to receive world: " + err.Error())
+			panic("Failed to receive working directory length: " + err.Error())
 		}
-		world = DeserializeWorld(buf)
+		workingDirLength := binary.LittleEndian.Uint64(buf)
+		//Receive string
+		buf = make([]byte, workingDirLength)
+		_, err = TCPConn.Read(buf)
+		if err != nil {
+			fmt.Println(err)
+			panic("Failed to receive working directory: " + err.Error())
+		}
+		workingDir := string(buf)
+		err = os.Chdir(workingDir)
+		if err != nil {
+			fmt.Println(err)
+			panic("Failed to change working directory: " + err.Error())
+		}
+		workingDir, _ = os.Getwd()
+		fmt.Println("Changed working directory to " + workingDir)
 	}
-	WorldSize = world.size
-	return world
+
+	// Sync the world state
+	// Receive buf size
+	bufSize := make([]byte, 8)
+	_, err = TCPConn.Read(bufSize)
+	if err != nil {
+		fmt.Println(err)
+		panic("Failed to receive buf size: " + err.Error())
+	}
+	buf = make([]byte, binary.LittleEndian.Uint64(bufSize))
+	fmt.Println("Received buf size " + strconv.Itoa(int(binary.LittleEndian.Uint64(bufSize))))
+
+	_, err = TCPConn.Read(buf)
+	if err != nil {
+		fmt.Println(err)
+		panic("Failed to receive world: " + err.Error())
+	}
+	world = DeserializeWorld(buf)
 }
 
 // If Master calls this function, rank is required
