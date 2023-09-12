@@ -1,5 +1,0 @@
-#!/bin/bash
-
-set -euo pipefail
-
-GOARCH=arm GOARM=7 GOOS=linux go build -o main test/main.go && rsync -aP main jarred@192.168.1.11:/home/jarred/simpleMPI
