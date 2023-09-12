@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -26,8 +27,25 @@ type config struct {
 }
 
 type host struct {
-	Address string  `json:"address"`
-	Role    *string `json:"role,omitempty"`
+	// The host address
+	Address string `json:"address"`
+
+	// The host role ["master" | "slave"]
+	Role *string `json:"role,omitempty"`
+
+	// The directory is where the executable will be as well as
+	// where the directory will be changed to. Supports environment
+	// variable expansion.
+	Directory string `json:"directory"`
+
+	// The name of the executable being run.
+	ExeName string `json:"exe_name"`
+}
+
+// PathToExecutable returns the path to the executable file based on
+// the provided host configuration.
+func (h *host) PathToExecutable() string {
+	return filepath.Join(h.Directory, h.ExeName)
 }
 
 type hostGroup struct {
@@ -35,10 +53,65 @@ type hostGroup struct {
 }
 
 type MPIWorld struct {
-	Size   uint64
-	Rank   []uint64
+	size   uint64
+	rank   []uint64
 	IPPool []string
 	Port   []uint64
+}
+
+func NewHostGroup(filePath string) (*hostGroup, error) {
+	// reading IP from file, the first IP is the master node
+	// the rest are the slave nodes
+	ipFile, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var group hostGroup
+	err = json.Unmarshal(ipFile, &group)
+	if err != nil {
+		return nil, err
+	}
+
+	return &group, nil
+}
+
+func (hg *hostGroup) ArrangeHosts(world *MPIWorld) error {
+	hosts := hg.Hosts
+
+	masterFound := false
+	for _, host := range hosts {
+		// The role is optional, as long as we have a master node.
+		var role string
+		if host.Role == nil {
+			role = "node"
+		} else {
+			role = *host.Role
+		}
+
+		if role != "node" && role != "master" {
+			zap.L().Error("Invalid Role Found", zap.String("Role", role))
+			continue
+		}
+
+		if role == "master" {
+			masterFound = true
+		}
+
+		address := host.Address
+		world.IPPool = append(world.IPPool, address)
+
+		// get a random port number betwee 10000 and 20000
+		world.rank = append(world.rank, world.size)
+		world.size++
+	}
+
+	// Make sure that we found a master node
+	if !masterFound {
+		return errors.New("No master node found")
+	}
+
+	return nil
 }
 
 func init() {
@@ -51,11 +124,11 @@ func SerializeWorld(world *MPIWorld) []byte {
 	// size: uint64
 	buf := make([]byte, 0)
 	sizebuf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(sizebuf, world.Size)
+	binary.LittleEndian.PutUint64(sizebuf, world.size)
 	buf = append(buf, sizebuf...)
 
 	// rank: []uint64
-	for _, rank := range world.Rank {
+	for _, rank := range world.rank {
 		rankBuf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(rankBuf, rank)
 		buf = append(buf, rankBuf...)
@@ -83,19 +156,19 @@ func DeserializeWorld(buf []byte) *MPIWorld {
 	// format: size, rank, IPPool, Port
 	// size: uint64
 	world := new(MPIWorld)
-	world.Size = binary.LittleEndian.Uint64(buf[:8])
+	world.size = binary.LittleEndian.Uint64(buf[:8])
 	buf = buf[8:]
 
 	// rank: []uint64
-	world.Rank = make([]uint64, world.Size)
-	for i := uint64(0); i < world.Size; i++ {
-		world.Rank[i] = binary.LittleEndian.Uint64(buf[:8])
+	world.rank = make([]uint64, world.size)
+	for i := uint64(0); i < world.size; i++ {
+		world.rank[i] = binary.LittleEndian.Uint64(buf[:8])
 		buf = buf[8:]
 	}
 
 	// IPPool: []string
-	world.IPPool = make([]string, world.Size)
-	for i := uint64(0); i < world.Size; i++ {
+	world.IPPool = make([]string, world.size)
+	for i := uint64(0); i < world.size; i++ {
 		end := 0
 		for end < len(buf) && buf[end] != 0 {
 			end++
@@ -105,8 +178,8 @@ func DeserializeWorld(buf []byte) *MPIWorld {
 	}
 
 	// Port: []uint64
-	world.Port = make([]uint64, world.Size)
-	for i := uint64(0); i < world.Size; i++ {
+	world.Port = make([]uint64, world.size)
+	for i := uint64(0); i < world.size; i++ {
 		world.Port[i] = binary.LittleEndian.Uint64(buf[:8])
 		buf = buf[8:]
 	}
@@ -127,55 +200,12 @@ var (
 
 // SetIPPool unpacks the json file `filePath` and unrolls the ip groups
 // into the world and sets the rank and size as appropriate.
-func SetIPPool(filePath string, world *MPIWorld) error {
-	// reading IP from file, the first IP is the master node
-	// the rest are the slave nodes
-	ipFile, err := os.ReadFile(filePath)
+func SetIPPool(filePath string, world *MPIWorld) (*hostGroup, error) {
+	hg, err := NewHostGroup(filePath)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	var group hostGroup
-	err = json.Unmarshal(ipFile, &group)
-	if err != nil {
-		return err
-	}
-
-	hosts := group.Hosts
-
-	masterFound := false
-	for _, host := range hosts {
-		// The role is optional, as long as we have a master node.
-		var role string
-		if host.Role == nil {
-			role = "node"
-		} else {
-			role = *host.Role
-		}
-
-		if role != "node" && role != "master" {
-			zap.L().Error("Invalid Role Found", zap.String("Role", role))
-			continue
-		}
-
-		if role == "master" {
-			masterFound = true
-		}
-
-		address := host.Address
-		world.IPPool = append(world.IPPool, address)
-
-		// get a random port number betwee 10000 and 20000
-		world.Rank = append(world.Rank, world.Size)
-		world.Size++
-	}
-
-	// Make sure that we found a master node
-	if !masterFound {
-		return errors.New("No master node found")
-	}
-
-	return nil
+	return hg, hg.ArrangeHosts(world)
 }
 
 func GetLocalIP() ([]string, error) {
@@ -242,8 +272,8 @@ func WorldInit(hostFilePath, configFilePath string) *MPIWorld {
 		zap.String("ConfigFilePath", configFilePath),
 	)
 	world := new(MPIWorld)
-	world.Size = 0
-	world.Rank = make([]uint64, 0)
+	world.size = 0
+	world.rank = make([]uint64, 0)
 	world.IPPool = make([]string, 0)
 	world.Port = make([]uint64, 0)
 
@@ -255,14 +285,14 @@ func WorldInit(hostFilePath, configFilePath string) *MPIWorld {
 		zap.String("My IPs", strings.Join(selfIP, ",")),
 	)
 
-	//Setup TCP connections master <--> slaves
-
 	if !isSlave {
+		// Setup TCP connections master <--> slaves
 		ConfigureMaster(hostFilePath, configFilePath, world)
 	} else {
 		ConfigureSlave(world)
 	}
-	WorldSize = world.Size
+
+	WorldSize = world.size
 	return world
 }
 
@@ -275,30 +305,29 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 		zap.String("KeyFile", configuration.KeyFile),
 		zap.String("User", configuration.User))
 
-	err = SetIPPool(hostFilePath, world)
-
-	world.Port = make([]uint64, world.Size)
+	hg, err := SetIPPool(hostFilePath, world)
 	if err != nil {
 		panic(err)
 	}
 
-	if world.Size == 0 {
+	world.Port = make([]uint64, world.size)
+	if world.size == 0 {
 		panic("World has no slaves")
 	}
 
-	MasterToSlaveTCPConn = make([]*net.Conn, world.Size)
-	SlaveOutputs = make([]bytes.Buffer, world.Size)
-	SlaveOutputsErr = make([]bytes.Buffer, world.Size)
-	MasterToSlaveListener = make([]*net.Listener, world.Size)
+	MasterToSlaveTCPConn = make([]*net.Conn, world.size)
+	SlaveOutputs = make([]bytes.Buffer, world.size)
+	SlaveOutputsErr = make([]bytes.Buffer, world.size)
+	MasterToSlaveListener = make([]*net.Listener, world.size)
 	MasterToSlaveTCPConn[0] = nil
 
 	// The path of the executable always is assumed to be in the
 	// home directory
-	selfFileLocation := "$HOME/simpleMPI/main"
-	// selfFileLocation, _ := os.Executable()
+	// selfFileLocation := "$HOME/simpleMPI/main"
 
 	SelfRank = 0
-	for i := 1; i < int(world.Size); i++ {
+	for i := 1; i < int(world.size); i++ {
+		hostFileLocation := hg.Hosts[i].PathToExecutable()
 		slaveIP := world.IPPool[i]
 		slavePort := world.Port[i]
 		slaveRank := uint64(i)
@@ -346,7 +375,7 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 			fmt.Println(err)
 			panic("Failed to create session: " + err.Error())
 		}
-		Command := selfFileLocation
+		Command := hostFileLocation
 		for j := 1; j < len(os.Args); j++ {
 			Command += " " + os.Args[j]
 		}
