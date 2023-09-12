@@ -3,12 +3,12 @@
         {
             "address": "192.168.1.8",
             "role": "master",
-            "directory": "$HOME/Documents/Projects/zkp.nosync/simpleMPI",
+            "directory": "/path/to/simpleMPI",
             "exe_name": "main"
         },
         {
             "address": "192.168.1.11",
-            "directory": "$HOME/simpleMPI",
+            "directory": "/path/to/simpleMPI",
             "exe_name": "main"
         }
     ]

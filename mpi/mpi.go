@@ -321,13 +321,9 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 	MasterToSlaveListener = make([]*net.Listener, world.size)
 	MasterToSlaveTCPConn[0] = nil
 
-	// The path of the executable always is assumed to be in the
-	// home directory
-	// selfFileLocation := "$HOME/simpleMPI/main"
-
 	SelfRank = 0
 	for i := 1; i < int(world.size); i++ {
-		hostFileLocation := hg.Hosts[i].PathToExecutable()
+		executableFileLocation := hg.Hosts[i].PathToExecutable()
 		slaveIP := world.IPPool[i]
 		slavePort := world.Port[i]
 		slaveRank := uint64(i)
@@ -375,7 +371,7 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 			fmt.Println(err)
 			panic("Failed to create session: " + err.Error())
 		}
-		Command := hostFileLocation
+		Command := executableFileLocation
 		for j := 1; j < len(os.Args); j++ {
 			Command += " " + os.Args[j]
 		}
@@ -447,11 +443,8 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 
 		// Send the working directory
 		{
-			workingDir, err := os.Getwd()
-			if err != nil {
-				fmt.Println(err)
-				panic("Failed to get working directory: " + err.Error())
-			}
+			workingDir := hg.Hosts[i].Directory
+
 			//Send string length
 			buf = make([]byte, 8)
 			binary.LittleEndian.PutUint64(buf, uint64(len(workingDir)))
