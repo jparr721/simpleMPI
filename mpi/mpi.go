@@ -23,7 +23,7 @@ import (
 type config struct {
 	User    string `json:"user"`
 	KeyFile string `json:"keyfile"`
-	Verbose bool   `json:"verbose"`
+	Verbose bool   `json:"verbose,string"`
 }
 
 type host struct {
@@ -60,8 +60,6 @@ type MPIWorld struct {
 }
 
 func NewHostGroup(filePath string) (*hostGroup, error) {
-	// reading IP from file, the first IP is the master node
-	// the rest are the slave nodes
 	ipFile, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
@@ -76,6 +74,9 @@ func NewHostGroup(filePath string) (*hostGroup, error) {
 	return &group, nil
 }
 
+// ArrangeHosts takes the host group and a world pointer and assigns the roles and
+// their respective places in the MPIWorld struct. It also checks to make sure that
+// the appropriate nodes have been specified.
 func (hg *hostGroup) ArrangeHosts(world *MPIWorld) error {
 	hosts := hg.Hosts
 
@@ -238,14 +239,17 @@ func checkSlave() bool {
 //	 keyfile: string
 //	 verbose: bool
 //	}
-func ParseConfig(ConfigFilePath string) (config, error) {
-	var cfg config
+func ParseConfig(ConfigFilePath string) (*config, error) {
+	cfg := &config{}
 	configFile, err := os.ReadFile(ConfigFilePath)
 	if err != nil {
 		return cfg, err
 	}
 
-	json.Unmarshal(configFile, &cfg)
+	err = json.Unmarshal(configFile, &cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }
@@ -390,9 +394,9 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 			err := session.Run(Command)
 
 			if err != nil {
-				fmt.Println("COMMAND ERROR", err)
+				zap.L().Error("COMMAND ERROR", zap.String("Error", err.Error()))
 			} else {
-				fmt.Println("STDOUT", session.Stdout)
+				zap.L().Info("", zap.String("stdout", fmt.Sprint(session.Stdout)))
 			}
 		}()
 
