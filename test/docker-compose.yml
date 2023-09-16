@@ -1,0 +1,16 @@
+version: "3"
+services:
+  worker1:
+    image: worker
+    restart: always
+    ports:
+      - 2022:22
+  worker2:
+    image: worker
+    restart: always
+    ports:
+      - 2023:22
+
+volumes:
+  worker1:
+  worker2:

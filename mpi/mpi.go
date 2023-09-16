@@ -40,6 +40,9 @@ type host struct {
 
 	// The name of the executable being run.
 	ExeName string `json:"exe_name"`
+
+	// The optional port of the host (Default 22)
+	Port *int `json:"port,omitempty,string"`
 }
 
 // PathToExecutable returns the path to the executable file based on
@@ -329,6 +332,12 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 	for i := 1; i < int(world.size); i++ {
 		executableFileLocation := hg.Hosts[i].PathToExecutable()
 		slaveIP := world.IPPool[i]
+		slaveSshPort := 22
+		if hg.Hosts[i].Port != nil {
+			slaveSshPort = *hg.Hosts[i].Port
+		}
+		slaveSshAddress := slaveIP + ":" + strconv.Itoa(slaveSshPort)
+		// slaveSshPort := hg.Hosts[i].Port
 		slavePort := world.Port[i]
 		slaveRank := uint64(i)
 
@@ -343,8 +352,10 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 			fmt.Printf("unable to parse private key: %v\n", err)
 			panic("Failed to parse key")
 		}
-		zap.L().Info("Connecting to slave", zap.String("SlaveIP", slaveIP))
-		conn, err := ssh.Dial("tcp", slaveIP+":"+strconv.Itoa(int(22)), &ssh.ClientConfig{
+
+		zap.L().Info("Connecting to slave", zap.String("slaveSshAddress", slaveSshAddress))
+
+		conn, err := ssh.Dial("tcp", slaveSshAddress, &ssh.ClientConfig{
 			User: configuration.User,
 			Auth: []ssh.AuthMethod{
 				ssh.PublicKeys(signer),
