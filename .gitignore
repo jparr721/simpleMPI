@@ -17,3 +17,6 @@ main
 
 # Local raspberry pi scripts don't need to be checked in
 pibuild
+
+test/ip.json
+test/config.json
