@@ -1,16 +1,36 @@
 version: "3"
 services:
+  dispatcher:
+    image: worker
+    restart: always
+    ports:
+      - 2021:22
+    networks:
+      mynetwork:
+        ipv4_address: 172.20.0.2
+
   worker1:
     image: worker
     restart: always
     ports:
       - 2022:22
+    networks:
+      mynetwork:
+        ipv4_address: 172.20.0.3
+
   worker2:
     image: worker
     restart: always
     ports:
       - 2023:22
+    networks:
+      mynetwork:
+        ipv4_address: 172.20.0.4
 
-volumes:
-  worker1:
-  worker2:
+networks:
+  mynetwork:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
