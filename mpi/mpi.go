@@ -89,15 +89,15 @@ func DeserializeWorld(buf []byte) *MPIWorld {
 }
 
 var (
-	SelfRank              uint64
-	MasterToSlaveTCPConn  []*net.Conn
-	SlaveToMasterTCPConn  *net.Conn
-	MasterToSlaveListener []*net.Listener
-	SlaveOutputs          []bytes.Buffer
-	SlaveOutputsErr       []bytes.Buffer
-	BytesSent             uint64
-	BytesReceived         uint64
-	WorldSize             uint64
+	SelfRank                   uint64
+	DispatcherToWorkerTCPConn  []*net.Conn
+	WorkerToDispatcherTCPConn  *net.Conn
+	DispatcherToWorkerListener []*net.Listener
+	WorkerOutputs              []bytes.Buffer
+	WorkerOutputsErr           []bytes.Buffer
+	BytesSent                  uint64
+	BytesReceived              uint64
+	WorldSize                  uint64
 )
 
 // SetIPPool unpacks the json file `filePath` and unrolls the ip groups
@@ -128,9 +128,9 @@ func GetLocalIP() ([]string, error) {
 	return result, nil
 }
 
-func checkSlave() bool {
+func checkWorker() bool {
 	LastCommand := os.Args[len(os.Args)-1]
-	return strings.ToLower(LastCommand) == "slave"
+	return strings.ToLower(LastCommand) == "worker"
 }
 
 // ParseConfig parses the config JSON file
@@ -155,7 +155,7 @@ func ParseConfig(ConfigFilePath string) (*config, error) {
 	return cfg, nil
 }
 
-// WorldInit initializes the TCP connections between the main node and the slave nodes.
+// WorldInit initializes the TCP connections between the main node and the worker nodes.
 // It takes as input the HostFilePath which is a newline delimited sequence of IP addresses
 // with the host IP first. The format for this file is as follows:
 //
@@ -163,7 +163,7 @@ func ParseConfig(ConfigFilePath string) (*config, error) {
 //	localhost:9999
 //
 // The second paramter allows for the specification of the config file which allows for
-// the configuration of the slave nodes. An example of this configuration can be seen as
+// the configuration of the worker nodes. An example of this configuration can be seen as
 // follows:
 //
 //	{
@@ -184,25 +184,25 @@ func WorldInit(hostFilePath, configFilePath string) *MPIWorld {
 
 	selfIP, _ := GetLocalIP()
 
-	isSlave := checkSlave()
+	isWorker := checkWorker()
 	zap.L().Info("Assigning node position",
-		zap.Bool("isSlave", isSlave),
+		zap.Bool("isWorker", isWorker),
 		zap.String("My IPs", strings.Join(selfIP, ",")),
 	)
 
-	if !isSlave {
-		// Setup TCP connections master <--> slaves
-		ConfigureMaster(hostFilePath, configFilePath, world)
+	if !isWorker {
+		// Setup TCP connections dispatcher <--> workers
+		ConfigureDispatcher(hostFilePath, configFilePath, world)
 	} else {
-		ConfigureSlave(world)
+		ConfigureWorker(world)
 	}
 
 	WorldSize = world.size
 	return world
 }
 
-// If Master calls this function, rank is required
-// If Slave calls this function, rank is not required, it will send to Master
+// If Dispatcher calls this function, rank is required
+// If Worker calls this function, rank is not required, it will send to Dispatcher
 var sentBytes []byte
 var recvBytes []byte
 
@@ -214,9 +214,9 @@ func SendBytes(buf []byte, rank uint64) error {
 	for len(buf) > 0 {
 		n := 0
 		if SelfRank == 0 {
-			n, errorMsg = (*MasterToSlaveTCPConn[rank]).Write(buf)
+			n, errorMsg = (*DispatcherToWorkerTCPConn[rank]).Write(buf)
 		} else {
-			n, errorMsg = (*SlaveToMasterTCPConn).Write(buf)
+			n, errorMsg = (*WorkerToDispatcherTCPConn).Write(buf)
 		}
 		if errorMsg != nil {
 			fmt.Println(string(debug.Stack()))
@@ -229,8 +229,8 @@ func SendBytes(buf []byte, rank uint64) error {
 	return errorMsg
 }
 
-// If Master calls this function, rank is required, it will receive from rank-th slave
-// If Slave calls this function, rank is not required, it will receive from Master
+// If Dispatcher calls this function, rank is required, it will receive from rank-th worker
+// If Worker calls this function, rank is not required, it will receive from Dispatcher
 func ReceiveBytes(size uint64, rank uint64) ([]byte, error) {
 	buf := make([]byte, size)
 	var errorMsg error
@@ -240,11 +240,11 @@ func ReceiveBytes(size uint64, rank uint64) ([]byte, error) {
 		n := 0
 		tmpBuf := make([]byte, size-BytesRead)
 		if SelfRank == 0 {
-			(*MasterToSlaveTCPConn[rank]).SetReadDeadline(time.Now().Add(1000 * time.Second))
-			n, errorMsg = (*MasterToSlaveTCPConn[rank]).Read(tmpBuf)
+			(*DispatcherToWorkerTCPConn[rank]).SetReadDeadline(time.Now().Add(1000 * time.Second))
+			n, errorMsg = (*DispatcherToWorkerTCPConn[rank]).Read(tmpBuf)
 		} else {
-			(*SlaveToMasterTCPConn).SetReadDeadline(time.Now().Add(1000 * time.Second))
-			n, errorMsg = (*SlaveToMasterTCPConn).Read(tmpBuf)
+			(*WorkerToDispatcherTCPConn).SetReadDeadline(time.Now().Add(1000 * time.Second))
+			n, errorMsg = (*WorkerToDispatcherTCPConn).Read(tmpBuf)
 		}
 		for i := BytesRead; i < BytesRead+uint64(n); i++ {
 			buf[i] = tmpBuf[i-BytesRead]
@@ -277,11 +277,11 @@ func Close() {
 	fmt.Println("Received hash: " + fmt.Sprintf("%x", md5.Sum(recvBytes)))
 	if SelfRank == 0 {
 		time.Sleep(1 * time.Second)
-		for i := 1; i < len(MasterToSlaveTCPConn); i++ {
-			(*MasterToSlaveTCPConn[i]).Close()
-			(*MasterToSlaveListener[i]).Close()
+		for i := 1; i < len(DispatcherToWorkerTCPConn); i++ {
+			(*DispatcherToWorkerTCPConn[i]).Close()
+			(*DispatcherToWorkerListener[i]).Close()
 		}
 	} else {
-		(*SlaveToMasterTCPConn).Close()
+		(*WorkerToDispatcherTCPConn).Close()
 	}
 }

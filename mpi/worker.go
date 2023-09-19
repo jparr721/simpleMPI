@@ -10,20 +10,20 @@ import (
 	"go.uber.org/zap"
 )
 
-func ConfigureSlave(world *MPIWorld) {
-	// Connect to master node
-	masterIP := os.Args[len(os.Args)-3]
-	slavePort := os.Args[len(os.Args)-2]
+func ConfigureWorker(world *MPIWorld) {
+	// Connect to dispatcher node
+	dispatcherIP := os.Args[len(os.Args)-3]
+	workerPort := os.Args[len(os.Args)-2]
 
-	zap.L().Info("Connecting to master node", zap.String("Master IP", masterIP), zap.String("My Port", slavePort))
+	zap.L().Info("Connecting to dispatcher node", zap.String("Dispatcher IP", dispatcherIP), zap.String("My Port", workerPort))
 
-	TCPConn, err := net.Dial("tcp", masterIP+":"+slavePort)
-	SlaveToMasterTCPConn = &TCPConn
+	TCPConn, err := net.Dial("tcp", dispatcherIP+":"+workerPort)
+	WorkerToDispatcherTCPConn = &TCPConn
 	if err != nil {
 		fmt.Println(err)
 		panic("Failed to accept: " + err.Error())
 	}
-	// Receive master rank
+	// Receive dispatcher rank
 	buf := make([]byte, 8)
 	_, err = TCPConn.Read(buf)
 	if err != nil {

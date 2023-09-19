@@ -17,7 +17,7 @@ type host struct {
 	// The host address
 	Address string `json:"address"`
 
-	// The host role ["master" | "slave"]
+	// The host role ["dispatcher" | "worker"]
 	Role *string `json:"role,omitempty"`
 
 	// The directory is where the executable will be as well as
@@ -70,22 +70,22 @@ func NewHostGroup(filePath string) (*hostGroup, error) {
 func (hg *hostGroup) ArrangeHosts(world *MPIWorld) error {
 	hosts := hg.Hosts
 
-	masterFound := false
+	dispatcherFound := false
 	for _, host := range hosts {
-		// The role is optional, as long as we have a master node.
+		// The role is optional, as long as we have a dispatcher node.
 		var role string
 		if host.Role == nil {
-			role = "node"
+			role = "worker"
 		} else {
 			role = *host.Role
 		}
 
-		if role != "node" && role != "master" {
+		if role != "worker" && role != "dispatcher" {
 			continue
 		}
 
-		if role == "master" {
-			masterFound = true
+		if role == "dispatcher" {
+			dispatcherFound = true
 		}
 
 		address := host.Address
@@ -96,9 +96,9 @@ func (hg *hostGroup) ArrangeHosts(world *MPIWorld) error {
 		world.size++
 	}
 
-	// Make sure that we found a master node
-	if !masterFound {
-		return errors.New("No master node found")
+	// Make sure that we found a dispatcher node
+	if !dispatcherFound {
+		return errors.New("No dispatcher node found")
 	}
 
 	return nil

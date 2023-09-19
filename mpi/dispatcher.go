@@ -14,7 +14,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
+func ConfigureDispatcher(hostFilePath, configFilePath string, world *MPIWorld) {
 	configuration, err := ParseConfig(configFilePath)
 	if err != nil {
 		panic(err)
@@ -30,29 +30,29 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 
 	world.Port = make([]uint64, world.size)
 	if world.size == 0 {
-		panic("World has no slaves")
+		panic("World has no workers")
 	}
 
-	MasterToSlaveTCPConn = make([]*net.Conn, world.size)
-	SlaveOutputs = make([]bytes.Buffer, world.size)
-	SlaveOutputsErr = make([]bytes.Buffer, world.size)
-	MasterToSlaveListener = make([]*net.Listener, world.size)
-	MasterToSlaveTCPConn[0] = nil
+	DispatcherToWorkerTCPConn = make([]*net.Conn, world.size)
+	WorkerOutputs = make([]bytes.Buffer, world.size)
+	WorkerOutputsErr = make([]bytes.Buffer, world.size)
+	DispatcherToWorkerListener = make([]*net.Listener, world.size)
+	DispatcherToWorkerTCPConn[0] = nil
 
 	SelfRank = 0
 	for i := 1; i < int(world.size); i++ {
 		executableFileLocation := hg.Hosts[i].PathToExecutable()
-		slaveIP := world.IPPool[i]
-		slaveSshPort := 22
+		workerIP := world.IPPool[i]
+		workerSshPort := 22
 		if hg.Hosts[i].Port != nil {
-			slaveSshPort = *hg.Hosts[i].Port
+			workerSshPort = *hg.Hosts[i].Port
 		}
-		slaveSshAddress := slaveIP + ":" + strconv.Itoa(slaveSshPort)
-		// slaveSshPort := hg.Hosts[i].Port
-		slavePort := world.Port[i]
-		slaveRank := uint64(i)
+		workerSshAddress := workerIP + ":" + strconv.Itoa(workerSshPort)
+		// workerSshPort := hg.Hosts[i].Port
+		workerPort := world.Port[i]
+		workerRank := uint64(i)
 
-		// Start slave process via ssh
+		// Start worker process via ssh
 		key, err := os.ReadFile(configuration.KeyFile)
 		if err != nil {
 			fmt.Printf("unable to read private key: %v\n", err)
@@ -64,9 +64,9 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 			panic("Failed to parse key")
 		}
 
-		zap.L().Info("Connecting to slave", zap.String("slaveSshAddress", slaveSshAddress))
+		zap.L().Info("Connecting to worker", zap.String("workerSshAddress", workerSshAddress))
 
-		conn, err := ssh.Dial("tcp", slaveSshAddress, &ssh.ClientConfig{
+		conn, err := ssh.Dial("tcp", workerSshAddress, &ssh.ClientConfig{
 			User: configuration.User,
 			Auth: []ssh.AuthMethod{
 				ssh.PublicKeys(signer),
@@ -79,14 +79,14 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 			panic("Failed to dial: " + err.Error())
 		}
 
-		// Listen to slave
-		listener, err := net.Listen("tcp", ":"+strconv.Itoa(int(slavePort)))
+		// Listen to worker
+		listener, err := net.Listen("tcp", ":"+strconv.Itoa(int(workerPort)))
 		if err != nil {
 			fmt.Println(err)
 			panic("Failed to listen: " + err.Error())
 		}
 		world.Port[i] = uint64(listener.Addr().(*net.TCPAddr).Port)
-		fmt.Println("Slave " + strconv.Itoa(i) + " Listening on port: " + strconv.Itoa(int(world.Port[i])))
+		fmt.Println("Worker " + strconv.Itoa(i) + " Listening on port: " + strconv.Itoa(int(world.Port[i])))
 		if err != nil {
 			fmt.Println(err)
 			panic("Failed to listen: " + err.Error())
@@ -102,7 +102,7 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 			Command += " " + os.Args[j]
 		}
 		Command += " " + world.IPPool[0] + " " + strconv.Itoa(int(world.Port[i]))
-		Command += " Slave"
+		Command += " Worker"
 
 		zap.L().Info("Preparing command", zap.String("Command", Command))
 
@@ -110,8 +110,8 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 		//run the command async and panic when command return error
 		go func() {
 			defer session.Close()
-			session.Stdout = &SlaveOutputs[i]
-			session.Stderr = &SlaveOutputsErr[i]
+			session.Stdout = &WorkerOutputs[i]
+			session.Stderr = &WorkerOutputsErr[i]
 			close(stdOutRedirected)
 			err := session.Run(Command)
 
@@ -133,11 +133,11 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 						}
 						time.Sleep(1 * time.Second)
 					}()
-					data, _ := SlaveOutputs[rank].ReadString('\n')
+					data, _ := WorkerOutputs[rank].ReadString('\n')
 					if data != "" && configuration.Verbose {
 						fmt.Println("rank " + strconv.Itoa(int(rank)) + " " + data)
 					}
-					data, _ = SlaveOutputsErr[rank].ReadString('\n')
+					data, _ = WorkerOutputsErr[rank].ReadString('\n')
 					if data != "" {
 						ErrorColor := "\033[1;31m%s\033[0m"
 						fmt.Printf(ErrorColor, "rank "+strconv.Itoa(int(rank))+" ERR "+data)
@@ -150,17 +150,17 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 		// Accept a connection
 		TCPConn, err := listener.Accept()
 
-		MasterToSlaveTCPConn[i] = &TCPConn
-		MasterToSlaveListener[i] = &listener
+		DispatcherToWorkerTCPConn[i] = &TCPConn
+		DispatcherToWorkerListener[i] = &listener
 		if err != nil {
 			fmt.Println(err)
 			panic("Failed to connect via TCP: " + err.Error())
 		}
-		fmt.Println("Connected to slave " + strconv.Itoa(i))
+		fmt.Println("Connected to worker " + strconv.Itoa(i))
 
-		// Send slave rank
+		// Send worker rank
 		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(slaveRank))
+		binary.LittleEndian.PutUint64(buf, uint64(workerRank))
 		_, err = TCPConn.Write(buf)
 		if err != nil {
 			fmt.Println(err)
@@ -185,7 +185,7 @@ func ConfigureMaster(hostFilePath, configFilePath string, world *MPIWorld) {
 				fmt.Println(err)
 				panic("Failed to send working directory: " + err.Error())
 			}
-			fmt.Println("Sent working directory to slave " + strconv.Itoa(i))
+			fmt.Println("Sent working directory to worker " + strconv.Itoa(i))
 		}
 
 		// Sync the world state
