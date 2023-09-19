@@ -42,13 +42,6 @@ type hostGroup struct {
 	Hosts []host `json:"hosts"`
 }
 
-type MPIWorld struct {
-	size   uint64
-	rank   []uint64
-	IPPool []string
-	Port   []uint64
-}
-
 func NewHostGroup(filePath string) (*hostGroup, error) {
 	ipFile, err := os.ReadFile(filePath)
 	if err != nil {

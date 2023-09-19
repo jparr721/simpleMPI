@@ -38,7 +38,7 @@ func ConfigureWorker(world *MPIWorld) {
 		buf = make([]byte, 8)
 		_, err = TCPConn.Read(buf)
 		if err != nil {
-			fmt.Println(err)
+			zap.L().Error(err.Error())
 			panic("Failed to receive working directory length: " + err.Error())
 		}
 		workingDirLength := binary.LittleEndian.Uint64(buf)
@@ -46,17 +46,17 @@ func ConfigureWorker(world *MPIWorld) {
 		buf = make([]byte, workingDirLength)
 		_, err = TCPConn.Read(buf)
 		if err != nil {
-			fmt.Println(err)
+			zap.L().Error(err.Error())
 			panic("Failed to receive working directory: " + err.Error())
 		}
 		workingDir := string(buf)
 		err = os.Chdir(workingDir)
 		if err != nil {
-			fmt.Println(err)
+			zap.L().Error(err.Error())
 			panic("Failed to change working directory: " + err.Error())
 		}
 		workingDir, _ = os.Getwd()
-		fmt.Println("Changed working directory to " + workingDir)
+		zap.L().Info("Changed working directory to " + workingDir)
 	}
 
 	// Sync the world state

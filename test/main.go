@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -18,9 +17,6 @@ func main() {
 	ipJson := filepath.Join(wd, "ip.json")
 	configJson := filepath.Join(wd, "config.json")
 
-	world := mpi.WorldInit(ipJson, configJson)
-	fmt.Println("WORLD", world)
-	fmt.Println("WORLD", world.IPPool)
-	fmt.Println("WORLD", world.Port)
+	mpi.WorldInit(ipJson, configJson)
 	mpi.Close()
 }

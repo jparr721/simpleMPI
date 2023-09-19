@@ -139,8 +139,10 @@ func ConfigureDispatcher(hostFilePath, configFilePath string, world *MPIWorld) {
 					}
 					data, _ = WorkerOutputsErr[rank].ReadString('\n')
 					if data != "" {
-						ErrorColor := "\033[1;31m%s\033[0m"
-						fmt.Printf(ErrorColor, "rank "+strconv.Itoa(int(rank))+" ERR "+data)
+						zap.L().Info("Command Output",
+							zap.String("rank", strconv.Itoa(int(rank))),
+							zap.String("message", data),
+						)
 					}
 					time.Sleep(1 * time.Microsecond)
 				}()
