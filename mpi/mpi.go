@@ -59,7 +59,7 @@ func GetLocalIP() ([]string, error) {
 	return result, nil
 }
 
-func checkWorker() bool {
+func checkSelfIsWorker() bool {
 	LastCommand := os.Args[len(os.Args)-1]
 	return strings.ToLower(LastCommand) == "worker"
 }
@@ -115,7 +115,7 @@ func WorldInit(hostFilePath, configFilePath string) *MPIWorld {
 
 	selfIP, _ := GetLocalIP()
 
-	isWorker := checkWorker()
+	isWorker := checkSelfIsWorker()
 	zap.L().Info("Assigning node position",
 		zap.Bool("isWorker", isWorker),
 		zap.String("My IPs", strings.Join(selfIP, ",")),
@@ -150,7 +150,7 @@ func SendBytes(buf []byte, rank uint64) error {
 			n, errorMsg = (*WorkerToDispatcherTCPConn).Write(buf)
 		}
 		if errorMsg != nil {
-			fmt.Println(string(debug.Stack()))
+			zap.L().Info(string(debug.Stack()))
 			return errorMsg
 		}
 		BytesSentInThisSession += n
@@ -182,9 +182,9 @@ func ReceiveBytes(size uint64, rank uint64) ([]byte, error) {
 		}
 		if errorMsg != nil {
 			if errorMsg.Error() == "EOF" {
-				fmt.Println("EOF")
+				zap.L().Info("EOF")
 			}
-			fmt.Println(string(debug.Stack()))
+			zap.L().Info(string(debug.Stack()))
 			return buf, errorMsg
 		}
 		BytesReceived += uint64(n)

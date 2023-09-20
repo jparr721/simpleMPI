@@ -9,6 +9,10 @@ type MPIWorld struct {
 	Port   []uint64
 }
 
+func (w *MPIWorld) Serialize() []byte {
+	return SerializeWorld(w)
+}
+
 func SerializeWorld(world *MPIWorld) []byte {
 	// serialize the MPIWorld struct
 	// format: size, rank, IPPool, Port

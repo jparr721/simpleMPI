@@ -75,26 +75,26 @@ func ConfigureDispatcher(hostFilePath, configFilePath string, world *MPIWorld) {
 		})
 
 		if err != nil {
-			fmt.Println(err)
+			zap.L().Info(err.Error())
 			panic("Failed to dial: " + err.Error())
 		}
 
 		// Listen to worker
 		listener, err := net.Listen("tcp", ":"+strconv.Itoa(int(workerPort)))
 		if err != nil {
-			fmt.Println(err)
+			zap.L().Info(err.Error())
 			panic("Failed to listen: " + err.Error())
 		}
 		world.Port[i] = uint64(listener.Addr().(*net.TCPAddr).Port)
-		fmt.Println("Worker " + strconv.Itoa(i) + " Listening on port: " + strconv.Itoa(int(world.Port[i])))
+		zap.L().Info("Worker " + strconv.Itoa(i) + " Listening on port: " + strconv.Itoa(int(world.Port[i])))
 		if err != nil {
-			fmt.Println(err)
+			zap.L().Info(err.Error())
 			panic("Failed to listen: " + err.Error())
 		}
 
 		session, err := conn.NewSession()
 		if err != nil {
-			fmt.Println(err)
+			zap.L().Info(err.Error())
 			panic("Failed to create session: " + err.Error())
 		}
 		Command := executableFileLocation
@@ -129,13 +129,13 @@ func ConfigureDispatcher(hostFilePath, configFilePath string, world *MPIWorld) {
 				func() {
 					defer func() {
 						if r := recover(); r != nil {
-							fmt.Println("Output err at rank", rank)
+							zap.L().Info("Output err at rank" + strconv.Itoa(int(rank)))
 						}
 						time.Sleep(1 * time.Second)
 					}()
 					data, _ := WorkerOutputs[rank].ReadString('\n')
 					if data != "" && configuration.Verbose {
-						fmt.Println("rank " + strconv.Itoa(int(rank)) + " " + data)
+						zap.L().Info("rank " + strconv.Itoa(int(rank)) + " " + data)
 					}
 					data, _ = WorkerOutputsErr[rank].ReadString('\n')
 					if data != "" {
@@ -155,17 +155,17 @@ func ConfigureDispatcher(hostFilePath, configFilePath string, world *MPIWorld) {
 		DispatcherToWorkerTCPConn[i] = &TCPConn
 		DispatcherToWorkerListener[i] = &listener
 		if err != nil {
-			fmt.Println(err)
+			zap.L().Info(err.Error())
 			panic("Failed to connect via TCP: " + err.Error())
 		}
-		fmt.Println("Connected to worker " + strconv.Itoa(i))
+		zap.L().Info("Connected to worker " + strconv.Itoa(i))
 
 		// Send worker rank
 		buf := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buf, uint64(workerRank))
 		_, err = TCPConn.Write(buf)
 		if err != nil {
-			fmt.Println(err)
+			zap.L().Info(err.Error())
 			panic("Failed to send rank: " + err.Error())
 		}
 
@@ -178,16 +178,16 @@ func ConfigureDispatcher(hostFilePath, configFilePath string, world *MPIWorld) {
 			binary.LittleEndian.PutUint64(buf, uint64(len(workingDir)))
 			_, err = TCPConn.Write(buf)
 			if err != nil {
-				fmt.Println(err)
+				zap.L().Info(err.Error())
 				panic("Failed to send working directory length: " + err.Error())
 			}
 			//Send string
 			_, err = TCPConn.Write([]byte(workingDir))
 			if err != nil {
-				fmt.Println(err)
+				zap.L().Info(err.Error())
 				panic("Failed to send working directory: " + err.Error())
 			}
-			fmt.Println("Sent working directory to worker " + strconv.Itoa(i))
+			zap.L().Info("Sent working directory to worker " + strconv.Itoa(i))
 		}
 
 		// Sync the world state
@@ -198,14 +198,14 @@ func ConfigureDispatcher(hostFilePath, configFilePath string, world *MPIWorld) {
 		binary.LittleEndian.PutUint64(bufSize, uint64(len(buf)))
 		_, err = TCPConn.Write(bufSize)
 		if err != nil {
-			fmt.Println(err)
+			zap.L().Info(err.Error())
 			panic("Failed to send buf size: " + err.Error())
 		}
 
 		//Send buf
 		_, err = TCPConn.Write(buf)
 		if err != nil {
-			fmt.Println(err)
+			zap.L().Info(err.Error())
 			panic("Failed to send world: " + err.Error())
 		}
 
